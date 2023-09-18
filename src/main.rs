@@ -1,6 +1,5 @@
 use env_logger;
-use log::debug;
-use log::trace;
+use log::{debug, trace};
 use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
@@ -42,8 +41,6 @@ fn handle_client(mut stream: TcpStream) {
     // read the SOCKS5 request
     let mut buf = [0; 4];
     stream.read_exact(&mut buf).unwrap();
-
-    println!("SOCKS5 request: ({:?})", buf);
 
     // check the SOCKS5 version and command
     if buf[0] != 0x05 {
