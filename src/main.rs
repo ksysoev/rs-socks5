@@ -1,5 +1,4 @@
-use std::io::Read;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
@@ -92,17 +91,56 @@ fn handle_client(mut stream: TcpStream) {
 
     println!("SOCKS5 request: {}:{} ({:?})", addr, port, buf);
 
+    let mut dest_stream = match TcpStream::connect((addr, port)) {
+        Ok(stream) => stream,
+        Err(e) => {
+            println!("Failed to connect to destination: {}", e);
+            stream
+                .write(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .unwrap();
+            stream.flush().unwrap();
+            return;
+        }
+    };
+
     // send the SOCKS5 request response
     stream
         .write(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
         .unwrap();
     stream.flush().unwrap();
 
-    // read the SOCKS5 data
-    let mut buf = [0; 128];
-    stream.read(&mut buf).unwrap();
+    loop {
+        let mut client_buf = [0; 4096];
+        match stream.read(&mut client_buf) {
+            Ok(n) => {
+                if n == 0 {
+                    break;
+                }
+                dest_stream.write_all(&client_buf[0..n]).unwrap();
+                dest_stream.flush().unwrap();
+            }
+            Err(e) => {
+                println!("Failed to read from client: {}", e);
+                break;
+            }
+        }
 
-    println!("SOCKS5 data: {:?}", buf);
+        let mut dest_buf = [0; 4096];
+
+        match dest_stream.read(&mut dest_buf) {
+            Ok(n) => {
+                if n == 0 {
+                    break;
+                }
+                stream.write_all(&dest_buf[0..n]).unwrap();
+                stream.flush().unwrap();
+            }
+            Err(e) => {
+                println!("Failed to read from destination: {}", e);
+                break;
+            }
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
