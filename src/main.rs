@@ -1,3 +1,6 @@
+use env_logger;
+use log::debug;
+use log::trace;
 use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
@@ -8,31 +11,27 @@ use std::net::{TcpListener, TcpStream};
 const ADDRESS: &str = "127.0.0.1:1080";
 
 fn handle_client(mut stream: TcpStream) {
-    println!("New client: {}", stream.peer_addr().unwrap());
+    trace!("New client: {}", stream.peer_addr().unwrap());
 
     let mut buf = [0u8; 2];
     stream.read_exact(&mut buf).unwrap();
 
     if buf[0] != 0x05 {
-        println!("Invalid SOCKS5 version");
+        trace!("Invalid SOCKS5 version");
         return;
     }
 
     let num_methods = buf[1] as usize;
-    println!("SOCKS5 number methods: ({:?})", num_methods);
 
     let mut methods = vec![0; num_methods];
     for _ in 0..num_methods {
         let mut buf = [0u8; 1];
-        println!("SOCKS5 reading method");
         stream.read_exact(&mut buf).unwrap();
-        println!("SOCKS5 method: ({:?})", buf);
         methods.push(buf[0]);
     }
 
-    println!("SOCKS5 methods: ({:?})", methods);
     if !methods.contains(&0x00) {
-        println!("No supported authentication methods");
+        trace!("No supported authentication methods");
         return;
     }
 
@@ -48,12 +47,12 @@ fn handle_client(mut stream: TcpStream) {
 
     // check the SOCKS5 version and command
     if buf[0] != 0x05 {
-        println!("Invalid SOCKS5 version");
+        trace!("Invalid SOCKS5 version");
         return;
     }
 
     if buf[1] != 0x01 {
-        println!("Unsupported SOCKS5 command");
+        trace!("Unsupported SOCKS5 command");
         return;
     }
 
@@ -80,7 +79,7 @@ fn handle_client(mut stream: TcpStream) {
             addrs.next().unwrap().ip()
         }
         _ => {
-            println!("Invalid SOCKS5 address type");
+            trace!("Invalid SOCKS5 address type");
             return;
         }
     };
@@ -89,12 +88,12 @@ fn handle_client(mut stream: TcpStream) {
     stream.read_exact(&mut buf).unwrap();
     let port = u16::from_be_bytes(buf);
 
-    println!("SOCKS5 request: {}:{} ({:?})", addr, port, buf);
+    debug!("SOCKS5 request: {}:{} ({:?})", addr, port, buf);
 
     let mut dest_stream = match TcpStream::connect((addr, port)) {
         Ok(stream) => stream,
         Err(e) => {
-            println!("Failed to connect to destination: {}", e);
+            debug!("Failed to connect to destination: {}", e);
             stream
                 .write(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
                 .unwrap();
@@ -120,7 +119,7 @@ fn handle_client(mut stream: TcpStream) {
                 dest_stream.flush().unwrap();
             }
             Err(e) => {
-                println!("Failed to read from client: {}", e);
+                debug!("Failed to read from client: {}", e);
                 break;
             }
         }
@@ -136,7 +135,7 @@ fn handle_client(mut stream: TcpStream) {
                 stream.flush().unwrap();
             }
             Err(e) => {
-                println!("Failed to read from destination: {}", e);
+                debug!("Failed to read from destination: {}", e);
                 break;
             }
         }
@@ -144,6 +143,7 @@ fn handle_client(mut stream: TcpStream) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
     let listener = TcpListener::bind(ADDRESS)?;
 
     // accept connections and process them serially
