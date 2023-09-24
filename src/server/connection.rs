@@ -1,4 +1,4 @@
-use log::{debug, trace};
+use log::debug;
 use std::fmt;
 use std::io;
 use std::net::IpAddr;
@@ -38,17 +38,31 @@ const BUFFER_SIZE: usize = 4096;
 enum SOCKS5ConnectionErr {
     InvalidVersion,
     UnsupportedAuthMethod,
-    // UnsupportedCommand,
-    // InvalidAddressType,
+    UnsupportedCommand,
+    InvalidAddressType,
     ConnectionFailed,
+}
+
+#[derive(Debug)]
+enum SOCKS5Command {
+    Connect(Address),
+    // Bind,
+    // UdpAssociate,
+}
+
+#[derive(Debug)]
+struct Address {
+    raw: Vec<u8>,
+    host: IpAddr,
+    port: u16,
 }
 
 impl fmt::Display for SOCKS5ConnectionErr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SOCKS5ConnectionErr::InvalidVersion => write!(f, "Invalid SOCKS5 version"),
-            // SOCKS5ConnectionErr::UnsupportedCommand => write!(f, "Unsupported SOCKS5 command"),
-            // SOCKS5ConnectionErr::InvalidAddressType => write!(f, "Invalid SOCKS5 address type"),
+            SOCKS5ConnectionErr::UnsupportedCommand => write!(f, "Unsupported SOCKS5 command"),
+            SOCKS5ConnectionErr::InvalidAddressType => write!(f, "Invalid SOCKS5 address type"),
             SOCKS5ConnectionErr::ConnectionFailed => write!(f, "Failed to connect to destination"),
             SOCKS5ConnectionErr::UnsupportedAuthMethod => {
                 write!(f, "Unsupported SOCKS5 authentication method")
@@ -72,75 +86,29 @@ impl SOCKS5ClientConnection {
             return;
         }
 
-        // read the SOCKS5 request
-        let mut buf = [0; 4];
-        read_exact(&self.stream, &mut buf).await.unwrap();
-
-        // check the SOCKS5 version and command
-        if buf[0] != PROTOCOL_VERSION {
-            trace!("Invalid SOCKS5 version");
-            return;
-        }
-
-        if buf[1] != PROXY_CMD_CONNECT {
-            trace!("Unsupported SOCKS5 command");
-            return;
-        }
-
-        let mut address_info: Vec<u8> = Vec::new();
-        address_info.push(buf[3]);
-        // handle the SOCKS5 request
-        let addr = match buf[3] {
-            ADDRESS_TYPE_IPV4 => {
-                let mut buf = [0; 4];
-                read_exact(&self.stream, &mut buf).await.unwrap();
-                address_info.extend_from_slice(&buf);
-                IpAddr::V4(Ipv4Addr::from(buf))
-            }
-            ADDRESS_TYPE_IPV6 => {
-                let mut buf = [0; 16];
-                read_exact(&self.stream, &mut buf).await.unwrap();
-                address_info.extend_from_slice(&buf);
-                IpAddr::V6(Ipv6Addr::from(buf))
-            }
-            ADDRESS_TYPE_DOMAIN_NAME => {
-                let mut buf = [0; 1];
-                read_exact(&self.stream, &mut buf).await.unwrap();
-                address_info.extend_from_slice(&buf);
-                let len = buf[0] as usize;
-                let mut buf = vec![0; len];
-                read_exact(&self.stream, &mut buf).await.unwrap();
-                address_info.extend_from_slice(&buf);
-                let domain = String::from_utf8_lossy(&buf);
-                let mut addrs = (domain.as_ref(), 0).to_socket_addrs().unwrap();
-                addrs.next().unwrap().ip()
-            }
-            _ => {
-                trace!("Invalid SOCKS5 address type");
+        let mut addr = match self.read_command().await {
+            Ok(SOCKS5Command::Connect(addr)) => addr,
+            Err(e) => {
+                debug!("SOCKS5 command failed: {}", e);
                 return;
             }
         };
 
-        let mut buf = [0; 2];
-        read_exact(&self.stream, &mut buf).await.unwrap();
-        address_info.extend_from_slice(&buf);
-        let port = u16::from_be_bytes(buf);
+        debug!("SOCKS5 request: {}:{}", addr.host, addr.port);
 
-        debug!("SOCKS5 request: {}:{} ({:?})", addr, port, buf);
-
-        let dest_stream = match TcpStream::connect((addr, port)).await {
+        let dest_stream = match TcpStream::connect((addr.host, addr.port)).await {
             Ok(stream) => stream,
             Err(e) => {
                 debug!("Failed to connect to destination: {}", e);
                 let mut data = vec![PROTOCOL_VERSION, REPLY_CONNECTION_REFUSED, RESERVED];
-                data.append(&mut address_info);
+                data.append(&mut addr.raw);
                 write_all(&self.stream, &data).await.unwrap();
                 return;
             }
         };
 
         let mut data = vec![PROTOCOL_VERSION, REPLY_SUCCEEDED, RESERVED];
-        data.append(&mut address_info);
+        data.append(&mut addr.raw);
         write_all(&self.stream, &mut data).await.unwrap();
 
         loop {
@@ -214,6 +182,81 @@ impl SOCKS5ClientConnection {
         }
 
         Ok(())
+    }
+
+    async fn read_command(&mut self) -> Result<SOCKS5Command, SOCKS5ConnectionErr> {
+        // read the SOCKS5 request
+        let mut buf = [0; 4];
+        if let Err(_) = read_exact(&self.stream, &mut buf).await {
+            return Err(SOCKS5ConnectionErr::ConnectionFailed);
+        }
+
+        // check the SOCKS5 version and command
+        if buf[0] != PROTOCOL_VERSION {
+            return Err(SOCKS5ConnectionErr::InvalidVersion);
+        }
+
+        if buf[1] != PROXY_CMD_CONNECT {
+            return Err(SOCKS5ConnectionErr::UnsupportedCommand);
+        }
+
+        let mut address_info: Vec<u8> = Vec::new();
+        address_info.push(buf[3]);
+        // handle the SOCKS5 request
+        let addr = match buf[3] {
+            ADDRESS_TYPE_IPV4 => {
+                let mut buf = [0; 4];
+                if let Err(_) = read_exact(&self.stream, &mut buf).await {
+                    return Err(SOCKS5ConnectionErr::ConnectionFailed);
+                }
+                address_info.extend_from_slice(&buf);
+                IpAddr::V4(Ipv4Addr::from(buf))
+            }
+            ADDRESS_TYPE_IPV6 => {
+                let mut buf = [0; 16];
+                if let Err(_) = read_exact(&self.stream, &mut buf).await {
+                    return Err(SOCKS5ConnectionErr::ConnectionFailed);
+                }
+                address_info.extend_from_slice(&buf);
+                IpAddr::V6(Ipv6Addr::from(buf))
+            }
+            ADDRESS_TYPE_DOMAIN_NAME => {
+                let mut buf = [0; 1];
+
+                if let Err(_) = read_exact(&self.stream, &mut buf).await {
+                    return Err(SOCKS5ConnectionErr::ConnectionFailed);
+                }
+
+                address_info.extend_from_slice(&buf);
+                let len = buf[0] as usize;
+                let mut buf = vec![0; len];
+                if let Err(_) = read_exact(&self.stream, &mut buf).await {
+                    return Err(SOCKS5ConnectionErr::ConnectionFailed);
+                }
+                address_info.extend_from_slice(&buf);
+                let domain = String::from_utf8_lossy(&buf);
+                let mut addrs = (domain.as_ref(), 0).to_socket_addrs().unwrap();
+                addrs.next().unwrap().ip()
+            }
+            _ => {
+                return Err(SOCKS5ConnectionErr::InvalidAddressType);
+            }
+        };
+
+        let mut buf = [0; 2];
+        if let Err(_) = read_exact(&self.stream, &mut buf).await {
+            return Err(SOCKS5ConnectionErr::ConnectionFailed);
+        }
+        address_info.extend_from_slice(&buf);
+        let port = u16::from_be_bytes(buf);
+
+        let addr = Address {
+            raw: address_info,
+            host: addr,
+            port: port,
+        };
+
+        Ok(SOCKS5Command::Connect(addr))
     }
 }
 
