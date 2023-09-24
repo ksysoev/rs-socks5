@@ -18,8 +18,9 @@ impl SOCKS5Server {
 
         loop {
             let (socket, _) = listener.accept().await.unwrap();
+            let mut connection = connection::SOCKS5ClientConnection::new(socket);
             tokio::spawn(async move {
-                connection::process(socket).await;
+                connection.process().await;
             });
         }
     }
