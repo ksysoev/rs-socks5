@@ -86,68 +86,19 @@ impl SOCKS5ClientConnection {
             return;
         }
 
-        let mut addr = match self.read_command().await {
-            Ok(SOCKS5Command::Connect(addr)) => addr,
+        match self.parse_command().await {
+            Ok(SOCKS5Command::Connect(addr)) => {
+                debug!("SOCKS5 request: connect to {}:{}", addr.host, addr.port);
+                if let Err(e) = self.process_connect(addr).await {
+                    debug!("SOCKS5 connect failed: {}", e);
+                    return;
+                }
+            }
             Err(e) => {
                 debug!("SOCKS5 command failed: {}", e);
                 return;
             }
         };
-
-        debug!("SOCKS5 request: {}:{}", addr.host, addr.port);
-
-        let dest_stream = match TcpStream::connect((addr.host, addr.port)).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                debug!("Failed to connect to destination: {}", e);
-                let mut data = vec![PROTOCOL_VERSION, REPLY_CONNECTION_REFUSED, RESERVED];
-                data.append(&mut addr.raw);
-                write_all(&self.stream, &data).await.unwrap();
-                return;
-            }
-        };
-
-        let mut data = vec![PROTOCOL_VERSION, REPLY_SUCCEEDED, RESERVED];
-        data.append(&mut addr.raw);
-        write_all(&self.stream, &mut data).await.unwrap();
-
-        loop {
-            tokio::select! {
-                _ = self.stream.readable() => {
-                    let mut buf = [0; BUFFER_SIZE];
-
-                    match self.stream.try_read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            write_all(&dest_stream, &buf[0..n]).await.unwrap();
-                        }
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            continue;
-                        }
-                        Err(_) => {
-                            break;
-                        }
-                    }
-                }
-                _ = dest_stream.readable() => {
-                    let mut buf = [0; BUFFER_SIZE];
-
-                    match dest_stream.try_read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            write_all(&self.stream, &buf[0..n]).await.unwrap();
-                        }
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            continue;
-                        }
-                        Err(_) => {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        debug!("Connection closed");
     }
 
     async fn handle_shake(&mut self) -> Result<(), SOCKS5ConnectionErr> {
@@ -184,7 +135,7 @@ impl SOCKS5ClientConnection {
         Ok(())
     }
 
-    async fn read_command(&mut self) -> Result<SOCKS5Command, SOCKS5ConnectionErr> {
+    async fn parse_command(&mut self) -> Result<SOCKS5Command, SOCKS5ConnectionErr> {
         // read the SOCKS5 request
         let mut buf = [0; 4];
         if let Err(_) = read_exact(&self.stream, &mut buf).await {
@@ -257,6 +208,61 @@ impl SOCKS5ClientConnection {
         };
 
         Ok(SOCKS5Command::Connect(addr))
+    }
+
+    async fn process_connect(&mut self, mut addr: Address) -> Result<(), SOCKS5ConnectionErr> {
+        let dest_stream = match TcpStream::connect((addr.host, addr.port)).await {
+            Ok(stream) => stream,
+            Err(_) => {
+                let mut data = vec![PROTOCOL_VERSION, REPLY_CONNECTION_REFUSED, RESERVED];
+                data.append(&mut addr.raw);
+                write_all(&self.stream, &data).await.unwrap();
+                return Err(SOCKS5ConnectionErr::ConnectionFailed);
+            }
+        };
+
+        let mut data = vec![PROTOCOL_VERSION, REPLY_SUCCEEDED, RESERVED];
+        data.append(&mut addr.raw);
+        write_all(&self.stream, &mut data).await.unwrap();
+
+        loop {
+            tokio::select! {
+                _ = self.stream.readable() => {
+                    let mut buf = [0; BUFFER_SIZE];
+
+                    match self.stream.try_read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            write_all(&dest_stream, &buf[0..n]).await.unwrap();
+                        }
+                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            continue;
+                        }
+                        Err(_) => {
+                            break;
+                        }
+                    }
+                }
+                _ = dest_stream.readable() => {
+                    let mut buf = [0; BUFFER_SIZE];
+
+                    match dest_stream.try_read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            write_all(&self.stream, &buf[0..n]).await.unwrap();
+                        }
+                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            continue;
+                        }
+                        Err(_) => {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
