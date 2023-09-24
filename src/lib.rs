@@ -6,11 +6,38 @@ use std::net::Ipv6Addr;
 use std::net::ToSocketAddrs;
 use tokio::net::TcpStream;
 
+const SUPPORTED_VERSION: u8 = 0x05;
+
+const NO_AUTHENTICATION_REQUIRED: u8 = 0x00;
+
+const PROXY_CMD_CONNECT: u8 = 0x01;
+// const PROXY_CMD_BIND: u8 = 0x02;
+// const PROXY_CMD_UDP_ASSOCIATE: u8 = 0x03;
+
+const ADDRESS_TYPE_IPV4: u8 = 0x01;
+const ADDRESS_TYPE_DOMAIN_NAME: u8 = 0x03;
+const ADDRESS_TYPE_IPV6: u8 = 0x04;
+
+const REPLY_SUCCEEDED: u8 = 0x00;
+// const REPLY_GENERAL_FAILURE: u8 = 0x01;
+// const REPLY_CONNECTION_NOT_ALLOWED: u8 = 0x02;
+// const REPLY_NETWORK_UNREACHABLE: u8 = 0x03;
+// const REPLY_HOST_UNREACHABLE: u8 = 0x04;
+const REPLY_CONNECTION_REFUSED: u8 = 0x05;
+// const REPLY_TTL_EXPIRED: u8 = 0x06;
+// const REPLY_COMMAND_NOT_SUPPORTED: u8 = 0x07;
+// const REPLY_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 0x08;
+// const REPLY_UNASSIGNED: u8 = 0x09;
+
+const RESERVED: u8 = 0x00;
+
+const BUFFER_SIZE: usize = 4096;
+
 pub async fn process(stream: TcpStream) {
     let mut buf = [0u8; 2];
     read_exact(&stream, &mut buf).await.unwrap();
 
-    if buf[0] != 0x05 {
+    if buf[0] != SUPPORTED_VERSION {
         trace!("Invalid SOCKS5 version");
         return;
     }
@@ -30,41 +57,49 @@ pub async fn process(stream: TcpStream) {
     }
 
     // send the SOCKS5 handshake response
-    write_all(&stream, &[0x05, 0x00]).await.unwrap();
+    write_all(&stream, &[SUPPORTED_VERSION, NO_AUTHENTICATION_REQUIRED])
+        .await
+        .unwrap();
 
     // read the SOCKS5 request
     let mut buf = [0; 4];
     read_exact(&stream, &mut buf).await.unwrap();
 
     // check the SOCKS5 version and command
-    if buf[0] != 0x05 {
+    if buf[0] != SUPPORTED_VERSION {
         trace!("Invalid SOCKS5 version");
         return;
     }
 
-    if buf[1] != 0x01 {
+    if buf[1] != PROXY_CMD_CONNECT {
         trace!("Unsupported SOCKS5 command");
         return;
     }
 
+    let mut address_info: Vec<u8> = Vec::new();
+    address_info.push(buf[3]);
     // handle the SOCKS5 request
     let addr = match buf[3] {
-        0x01 => {
+        ADDRESS_TYPE_IPV4 => {
             let mut buf = [0; 4];
             read_exact(&stream, &mut buf).await.unwrap();
+            address_info.extend_from_slice(&buf);
             IpAddr::V4(Ipv4Addr::from(buf))
         }
-        0x04 => {
+        ADDRESS_TYPE_IPV6 => {
             let mut buf = [0; 16];
             read_exact(&stream, &mut buf).await.unwrap();
+            address_info.extend_from_slice(&buf);
             IpAddr::V6(Ipv6Addr::from(buf))
         }
-        0x03 => {
+        ADDRESS_TYPE_DOMAIN_NAME => {
             let mut buf = [0; 1];
             read_exact(&stream, &mut buf).await.unwrap();
+            address_info.extend_from_slice(&buf);
             let len = buf[0] as usize;
             let mut buf = vec![0; len];
             read_exact(&stream, &mut buf).await.unwrap();
+            address_info.extend_from_slice(&buf);
             let domain = String::from_utf8_lossy(&buf);
             let mut addrs = (domain.as_ref(), 0).to_socket_addrs().unwrap();
             addrs.next().unwrap().ip()
@@ -77,6 +112,7 @@ pub async fn process(stream: TcpStream) {
 
     let mut buf = [0; 2];
     read_exact(&stream, &mut buf).await.unwrap();
+    address_info.extend_from_slice(&buf);
     let port = u16::from_be_bytes(buf);
 
     debug!("SOCKS5 request: {}:{} ({:?})", addr, port, buf);
@@ -85,22 +121,21 @@ pub async fn process(stream: TcpStream) {
         Ok(stream) => stream,
         Err(e) => {
             debug!("Failed to connect to destination: {}", e);
-
-            write_all(&stream, &[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-                .await
-                .unwrap();
+            let mut data = vec![SUPPORTED_VERSION, REPLY_CONNECTION_REFUSED, RESERVED];
+            data.append(&mut address_info);
+            write_all(&stream, &data).await.unwrap();
             return;
         }
     };
 
-    write_all(&stream, &[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-        .await
-        .unwrap();
+    let mut data = vec![SUPPORTED_VERSION, REPLY_SUCCEEDED, RESERVED];
+    data.append(&mut address_info);
+    write_all(&stream, &mut data).await.unwrap();
 
     loop {
         tokio::select! {
             _ = stream.readable() => {
-                let mut buf = [0; 4096];
+                let mut buf = [0; BUFFER_SIZE];
 
                 match stream.try_read(&mut buf) {
                     Ok(0) => break,
@@ -116,7 +151,7 @@ pub async fn process(stream: TcpStream) {
                 }
             }
             _ = dest_stream.readable() => {
-                let mut buf = [0; 4096];
+                let mut buf = [0; BUFFER_SIZE];
 
                 match dest_stream.try_read(&mut buf) {
                     Ok(0) => break,
