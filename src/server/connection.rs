@@ -52,7 +52,6 @@ enum SOCKS5Command {
 
 #[derive(Debug)]
 struct Address {
-    raw: Vec<u8>,
     host: IpAddr,
     port: u16,
 }
@@ -91,12 +90,10 @@ impl SOCKS5ClientConnection {
                 debug!("SOCKS5 request: connect to {}:{}", addr.host, addr.port);
                 if let Err(e) = self.process_connect(addr).await {
                     debug!("SOCKS5 connect failed: {}", e);
-                    return;
                 }
             }
             Err(e) => {
                 debug!("SOCKS5 command failed: {}", e);
-                return;
             }
         };
     }
@@ -202,7 +199,6 @@ impl SOCKS5ClientConnection {
         let port = u16::from_be_bytes(buf);
 
         let addr = Address {
-            raw: address_info,
             host: addr,
             port: port,
         };
@@ -210,19 +206,45 @@ impl SOCKS5ClientConnection {
         Ok(SOCKS5Command::Connect(addr))
     }
 
-    async fn process_connect(&mut self, mut addr: Address) -> Result<(), SOCKS5ConnectionErr> {
+    async fn process_connect(&mut self, addr: Address) -> Result<(), SOCKS5ConnectionErr> {
         let dest_stream = match TcpStream::connect((addr.host, addr.port)).await {
             Ok(stream) => stream,
             Err(_) => {
-                let mut data = vec![PROTOCOL_VERSION, REPLY_CONNECTION_REFUSED, RESERVED];
-                data.append(&mut addr.raw);
+                let data = vec![
+                    PROTOCOL_VERSION,
+                    REPLY_CONNECTION_REFUSED,
+                    RESERVED,
+                    ADDRESS_TYPE_IPV4,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ];
                 write_all(&self.stream, &data).await.unwrap();
                 return Err(SOCKS5ConnectionErr::ConnectionFailed);
             }
         };
 
+        let mut bnd_addr = match dest_stream.local_addr().unwrap().ip() {
+            IpAddr::V4(ipv4) => {
+                let mut addr = vec![ADDRESS_TYPE_IPV4];
+                addr.append(&mut ipv4.octets().to_vec());
+                addr
+            }
+            IpAddr::V6(ipv6) => {
+                let mut addr = vec![ADDRESS_TYPE_IPV6];
+                addr.append(&mut ipv6.octets().to_vec());
+                addr
+            }
+        };
+
         let mut data = vec![PROTOCOL_VERSION, REPLY_SUCCEEDED, RESERVED];
-        data.append(&mut addr.raw);
+
+        data.append(&mut bnd_addr);
+        data.extend_from_slice(&dest_stream.local_addr().unwrap().port().to_be_bytes());
+
         write_all(&self.stream, &mut data).await.unwrap();
 
         loop {
